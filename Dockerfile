@@ -1,6 +1,7 @@
-# Use official PyTorch image with CUDA 12.8 for Blackwell (B200) support
+# Use custom vLLM image with Blackwell (B200/SM 12.0) support
+# This image has patched Triton and vLLM optimized for Blackwell GPUs
 # Also compatible with Hopper (H100/H200) architecture
-FROM pytorch/pytorch:2.7.0-cuda12.8-cudnn9-devel
+FROM ghcr.io/gonka-ai/vllm:v0.9.1-blackwell
 
 # Set working directory
 WORKDIR /app
