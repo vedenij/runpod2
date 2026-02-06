@@ -440,6 +440,8 @@ def pooled_handler_v2(input_data: Dict) -> Generator[Dict, None, None]:
         public_key = ready_data.get("public_key")
         node_id = ready_data.get("node_id", 0)
         node_count = ready_data.get("node_count", 1)
+        group_id = ready_data.get("group_id", 0)
+        n_groups = ready_data.get("n_groups", 1)
 
         if not public_key:
             yield {"error": "No public_key in ready response", "error_type": "ConfigError", "fatal": True}
@@ -450,12 +452,14 @@ def pooled_handler_v2(input_data: Dict) -> Generator[Dict, None, None]:
         yield {"error": f"Ready notification failed: {e}", "error_type": "ReadyError", "fatal": True}
         return
 
-    logger.info(f"Job assigned: pk={public_key[:16]}..., node_id={node_id}/{node_count}")
+    logger.info(f"Job assigned: pk={public_key[:16]}..., node_id={node_id}/{node_count}, group_id={group_id}, n_groups={n_groups}")
     yield {
         "status": "job_assigned",
         "public_key": public_key[:16] + "...",
         "node_id": node_id,
         "node_count": node_count,
+        "group_id": group_id,
+        "n_groups": n_groups,
     }
 
     # Build callback URL (vLLM will append /generated automatically)
@@ -472,6 +476,8 @@ def pooled_handler_v2(input_data: Dict) -> Generator[Dict, None, None]:
             node_count=node_count,
             batch_size=batch_size,
             callback_url=callback_url,
+            group_id=group_id,
+            n_groups=n_groups,
         )
 
         yield {
