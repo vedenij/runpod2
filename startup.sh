@@ -6,7 +6,18 @@ echo "Model: ${MODEL_NAME}"
 echo "K_DIM: ${K_DIM}"
 echo "SEQ_LEN: ${SEQ_LEN}"
 
-# Detect number of GPUs
+# Generate unique worker ID
+export WORKER_ID=$(cat /proc/sys/kernel/random/uuid)
+echo "Worker ID: ${WORKER_ID}"
+
+# Early registration with orchestrator (before loading vLLM)
+ORCHESTRATOR_URL=${ORCHESTRATOR_URL:-""}
+if [ -z "$ORCHESTRATOR_URL" ]; then
+    echo "ERROR: ORCHESTRATOR_URL not set"
+    exit 1
+fi
+
+# Detect number of GPUs first (needed for registration)
 GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l || echo "0")
 echo "Detected GPUs: ${GPU_COUNT}"
 
@@ -15,6 +26,24 @@ if [ "$GPU_COUNT" -eq "0" ]; then
     exit 1
 fi
 
+echo ""
+echo "=== Registering with orchestrator ==="
+echo "Orchestrator: ${ORCHESTRATOR_URL}"
+
+REGISTER_RESPONSE=$(curl -s -X POST \
+    "${ORCHESTRATOR_URL}/api/workers/connect" \
+    -H "Content-Type: application/json" \
+    -d "{\"worker_id\": \"${WORKER_ID}\", \"gpu_count\": ${GPU_COUNT}, \"gpu_info\": []}" \
+    2>/dev/null || echo "")
+
+if [ -z "$REGISTER_RESPONSE" ]; then
+    echo "ERROR: Failed to register with orchestrator"
+    exit 1
+fi
+
+echo "Registered: ${REGISTER_RESPONSE}"
+
+# Calculate tensor parallel size (use all GPUs)
 # Calculate tensor parallel size (use all GPUs)
 TP_SIZE=${TENSOR_PARALLEL_SIZE:-$GPU_COUNT}
 echo "Tensor Parallel Size: ${TP_SIZE}"
@@ -57,6 +86,16 @@ while [ $ELAPSED -lt $MAX_WAIT ]; do
         echo "=== vLLM logs ==="
         tail -100 /tmp/vllm.log
         exit 1
+    fi
+
+    # Check for shutdown command from orchestrator
+    SHUTDOWN_CHECK=$(curl -s "${ORCHESTRATOR_URL}/api/workers/${WORKER_ID}/config" 2>/dev/null || echo "")
+    if echo "$SHUTDOWN_CHECK" | grep -q '"type":"shutdown"'; then
+        echo "Received shutdown command during vLLM loading - killing vLLM"
+        kill $VLLM_PID 2>/dev/null || true
+        wait $VLLM_PID 2>/dev/null || true
+        echo "vLLM killed, exiting gracefully"
+        exit 0
     fi
 
     # Check health endpoint

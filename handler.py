@@ -304,7 +304,6 @@ def pooled_handler_v2(input_data: Dict) -> Generator[Dict, None, None]:
         - block_hash, block_height (when session starts)
         - public_key, node_id, node_count (when job assigned)
     """
-    import uuid
     import subprocess
 
     orchestrator_url = input_data.get("orchestrator_url")
@@ -312,8 +311,12 @@ def pooled_handler_v2(input_data: Dict) -> Generator[Dict, None, None]:
         yield {"error": "orchestrator_url required", "error_type": "ValidationError", "fatal": True}
         return
 
-    # Generate worker ID
-    worker_id = str(uuid.uuid4())
+    # Get worker ID from environment (set by startup.sh after registration)
+    worker_id = os.getenv("WORKER_ID")
+    if not worker_id:
+        yield {"error": "WORKER_ID not set by startup.sh", "error_type": "ConfigError", "fatal": True}
+        return
+
     batch_size = input_data.get("batch_size", 32)
 
     # Detect GPU count
@@ -344,33 +347,7 @@ def pooled_handler_v2(input_data: Dict) -> Generator[Dict, None, None]:
 
     yield {"status": "vllm_ready", "worker_id": worker_id, "poc_version": "v2"}
 
-    # Connect to orchestrator
-    logger.info("Connecting to orchestrator...")
-    try:
-        response = requests.post(
-            f"{orchestrator_url}/api/workers/connect",
-            json={
-                "worker_id": worker_id,
-                "gpu_count": gpu_count,
-                "gpu_info": [],
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        connect_data = response.json()
-        logger.info(f"Connected: {connect_data}")
-
-        yield {
-            "status": "connected",
-            "worker_id": worker_id,
-            "connect_response": connect_data,
-        }
-
-    except Exception as e:
-        logger.error(f"Connection failed: {e}")
-        yield {"error": f"Connection failed: {e}", "error_type": "ConnectionError", "fatal": True}
-        return
-
+    # Worker already registered by startup.sh, just poll for config
     # Poll for config (block_hash) - wait up to 10 minutes
     logger.info("Waiting for block_hash from orchestrator (max 10 minutes)...")
     poll_start = time.time()
@@ -430,11 +407,34 @@ def pooled_handler_v2(input_data: Dict) -> Generator[Dict, None, None]:
 
         if ready_data.get("status") == "wait":
             logger.info("Orchestrator says wait for job assignment...")
-            # Could poll again here, but for simplicity assume job comes soon
             yield {"status": "waiting_for_job"}
-            time.sleep(5)
-            # TODO: implement polling for job assignment
-            yield {"error": "Job assignment not implemented yet", "error_type": "NotImplemented", "fatal": True}
+
+            # Poll for job assignment or shutdown (max 5 minutes)
+            poll_start = time.time()
+            max_wait = 300  # 5 minutes
+            while time.time() - poll_start < max_wait:
+                try:
+                    response = requests.get(
+                        f"{orchestrator_url}/api/workers/{worker_id}/config",
+                        timeout=10,
+                    )
+                    if response.status_code == 200:
+                        config = response.json()
+                        if config and config.get("type") == "shutdown":
+                            logger.info("Received shutdown during job wait")
+                            yield {"status": "shutdown", "reason": "no_job_assigned"}
+                            return
+                        # If got compute command, retry ready
+                        if config and config.get("type") == "compute":
+                            break
+                except Exception as e:
+                    logger.warning(f"Poll error during job wait: {e}")
+
+                time.sleep(5)
+
+            # Timeout - shutdown gracefully
+            logger.warning(f"No job assigned after {int(time.time() - poll_start)}s, shutting down")
+            yield {"error": "Timeout waiting for job", "error_type": "TimeoutError", "fatal": True}
             return
 
         public_key = ready_data.get("public_key")
