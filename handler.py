@@ -306,6 +306,12 @@ def pooled_handler_v2(input_data: Dict) -> Generator[Dict, None, None]:
     """
     import subprocess
 
+    # Check if shutdown happened during vLLM loading
+    if os.path.exists("/tmp/shutdown_flag"):
+        logger.info("Shutdown flag detected - exiting immediately")
+        yield {"status": "shutdown", "reason": "shutdown_during_vllm_load"}
+        return
+
     orchestrator_url = input_data.get("orchestrator_url")
     if not orchestrator_url:
         yield {"error": "orchestrator_url required", "error_type": "ValidationError", "fatal": True}
