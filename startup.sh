@@ -88,16 +88,6 @@ while [ $ELAPSED -lt $MAX_WAIT ]; do
         exit 1
     fi
 
-    # Check for shutdown command from orchestrator
-    SHUTDOWN_CHECK=$(curl -s "${ORCHESTRATOR_URL}/api/workers/${WORKER_ID}/config" 2>/dev/null || echo "")
-    if echo "$SHUTDOWN_CHECK" | grep -q '"type":"shutdown"'; then
-        echo "Received shutdown command during vLLM loading - killing vLLM"
-        kill $VLLM_PID 2>/dev/null || true
-        wait $VLLM_PID 2>/dev/null || true
-        echo "vLLM killed, exiting gracefully"
-        exit 0
-    fi
-
     # Check health endpoint
     if curl -s "http://${VLLM_HOST}:${VLLM_PORT}/health" >/dev/null 2>&1; then
         echo "vLLM is healthy after ${ELAPSED}s"
