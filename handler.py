@@ -36,7 +36,7 @@ VLLM_PORT = int(os.getenv("VLLM_PORT", "8000"))
 VLLM_BASE_URL = f"http://{VLLM_HOST}:{VLLM_PORT}"
 
 # Model settings
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8")
+MODEL_NAME = os.getenv("MODEL_NAME", "MiniMaxAI/MiniMax-M2.7")
 K_DIM = int(os.getenv("K_DIM", "12"))
 SEQ_LEN = int(os.getenv("SEQ_LEN", "1024"))
 
@@ -45,7 +45,7 @@ WARMUP_MODE = os.getenv("WARMUP_MODE", "false").lower() == "true"
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "")
 
 # HTTP timeouts
-REQUEST_TIMEOUT = 300  # 5 minutes for compute
+REQUEST_TIMEOUT = 660  # 11 minutes for compute
 
 
 # =============================================================================
@@ -464,51 +464,77 @@ def pooled_handler_v2(input_data: Dict) -> Generator[Dict, None, None]:
     except Exception:
         pass
 
-    # Model already loaded (vLLM warmup), notify ready
+    # Model already loaded (vLLM warmup), notify ready and retry until assigned or shutdown
     logger.info("Notifying orchestrator: ready for job assignment")
-    try:
-        response = requests.post(
-            f"{orchestrator_url}/api/workers/{worker_id}/ready",
-            json={"gpu_count": gpu_count},
-            timeout=30,
-        )
+    ready_start = time.time()
+    ready_max_wait = 600  # 10 minutes
 
-        # Worker not found (404) means session was cleared - shutdown
-        if response.status_code == 404:
-            logger.info("Worker not found (session ended) - shutting down")
-            yield {"status": "shutdown", "reason": "worker_not_found"}
+    public_key = None
+    node_id = 0
+    node_count = 1
+    group_id = 0
+    n_groups = 1
+
+    while time.time() - ready_start < ready_max_wait:
+        try:
+            response = requests.post(
+                f"{orchestrator_url}/api/workers/{worker_id}/ready",
+                json={"gpu_count": gpu_count},
+                timeout=30,
+            )
+
+            # Worker not found (404) means session was cleared - shutdown
+            if response.status_code == 404:
+                logger.info("Worker not found (session ended) - shutting down")
+                yield {"status": "shutdown", "reason": "worker_not_found"}
+                return
+
+            response.raise_for_status()
+            ready_data = response.json()
+
+            if ready_data.get("status") == "wait":
+                # Node not assigned yet - poll /config for shutdown, then retry
+                try:
+                    cfg_resp = requests.get(
+                        f"{orchestrator_url}/api/workers/{worker_id}/config",
+                        timeout=5,
+                    )
+                    if cfg_resp.status_code == 200:
+                        cmd = cfg_resp.json()
+                        if cmd and cmd.get("type") == "shutdown":
+                            logger.info("Received shutdown while waiting for job")
+                            yield {"status": "shutdown", "reason": "orchestrator_command"}
+                            return
+                except Exception:
+                    pass
+                time.sleep(2)
+                continue
+
+            public_key = ready_data.get("public_key")
+            node_id = ready_data.get("node_id", 0)
+            node_count = ready_data.get("node_count", 1)
+            group_id = ready_data.get("group_id", 0)
+            n_groups = ready_data.get("n_groups", 1)
+
+            if not public_key:
+                time.sleep(2)
+                continue
+
+            logger.info(f"Ready response: {ready_data}")
+            break
+
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"Ready notification failed: {e}")
+            yield {"error": f"Ready notification failed: {e}", "error_type": "ReadyError", "fatal": True}
             return
+        except Exception as e:
+            logger.warning(f"Ready request error: {e}")
+            time.sleep(2)
 
-        response.raise_for_status()
-        ready_data = response.json()
-        logger.info(f"Ready response: {ready_data}")
-
-        if ready_data.get("status") == "wait":
-            logger.info("Orchestrator says wait for job assignment...")
-            # Could poll again here, but for simplicity assume job comes soon
-            yield {"status": "waiting_for_job"}
-            time.sleep(5)
-            # TODO: implement polling for job assignment
-            yield {"error": "Job assignment not implemented yet", "error_type": "NotImplemented", "fatal": True}
-            return
-
-        public_key = ready_data.get("public_key")
-        node_id = ready_data.get("node_id", 0)
-        node_count = ready_data.get("node_count", 1)
-        group_id = ready_data.get("group_id", 0)
-        n_groups = ready_data.get("n_groups", 1)
-
-        if not public_key:
-            yield {"error": "No public_key in ready response", "error_type": "ConfigError", "fatal": True}
-            return
-
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"Ready notification failed: {e}")
-        yield {"error": f"Ready notification failed: {e}", "error_type": "ReadyError", "fatal": True}
-        return
-    except Exception as e:
-        logger.error(f"Ready notification failed: {e}")
-        yield {"error": f"Ready notification failed: {e}", "error_type": "ReadyError", "fatal": True}
+    if not public_key:
+        elapsed = int(time.time() - ready_start)
+        logger.error(f"Timeout waiting for job assignment ({elapsed}s)")
+        yield {"error": f"Timeout waiting for job assignment ({elapsed}s)", "error_type": "TimeoutError", "fatal": True}
         return
 
     logger.info(f"Job assigned: pk={public_key[:16]}..., node_id={node_id}/{node_count}, group_id={group_id}, n_groups={n_groups}")

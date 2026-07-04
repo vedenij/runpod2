@@ -15,7 +15,7 @@ if [ "$GPU_COUNT" -eq "0" ]; then
     exit 1
 fi
 
-# Use actual GPU count (auto-detect)
+# Use actual GPU count (auto-detect). MiniMax-M2.7 prod profile expects TP=2 (2xH200) or TP=4 (4xH100/H200).
 TP_SIZE=${GPU_COUNT}
 echo "Tensor Parallel Size: ${TP_SIZE}"
 
@@ -28,19 +28,24 @@ echo "=== Starting vLLM Server ==="
 echo "Port: ${VLLM_PORT}"
 echo "Host: ${VLLM_HOST}"
 
-# Start vLLM server in background (PoC endpoints included in v0.9.1-poc-v2-post2)
-# --load-format runai_streamer: parallel safetensor loading (faster model load)
+# Start vLLM server in background with MiniMax-M2.7 flags matching kaitakuai's prod profile
+# and modal/test1.py:291-308. Do NOT change without updating both.
 /usr/bin/python3.12 -m vllm.entrypoints.openai.api_server \
     --model "${MODEL_NAME}" \
     --host "${VLLM_HOST}" \
     --port "${VLLM_PORT}" \
-    --tensor-parallel-size "${TP_SIZE}" \
     --trust-remote-code \
-    --gpu-memory-utilization 0.85 \
-    --max-model-len 1025 \
-    --enforce-eager \
-    --load-format runai_streamer \
-    --model-loader-extra-config '{"concurrency":16}' \
+    --tensor-parallel-size "${TP_SIZE}" \
+    --attention-backend FLASHINFER \
+    --moe-backend triton \
+    --gpu-memory-utilization 0.92 \
+    --max-num-seqs 128 \
+    --enable-auto-tool-choice \
+    --max-model-len 180000 \
+    --kv-cache-dtype fp8 \
+    --logprobs-mode processed_logprobs \
+    --tool-call-parser minimax_m2 \
+    --reasoning-parser minimax_m2_append_think \
     2>&1 | tee /tmp/vllm.log &
 
 VLLM_PID=$!
